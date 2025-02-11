@@ -13,3 +13,4 @@ pytest-mock
 pytest-cov
 undetected-chromedriver==3.5.5
 beautifulsoup4==4.13.3
+selenium-stealth

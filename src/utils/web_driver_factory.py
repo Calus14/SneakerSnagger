@@ -1,11 +1,10 @@
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium_stealth import stealth
 from selenium.webdriver.firefox.service import Service as FireFoxService
 from selenium.webdriver.remote.webdriver import BaseWebDriver
 import undetected_chromedriver as uc
 from src.config.local_logging import LocalLogging
-
 
 class WebDriverFactory():
     '''
@@ -17,9 +16,8 @@ class WebDriverFactory():
 
     def chrome_browser_options(self) -> Options:
         options = webdriver.ChromeOptions()
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument("--disable-extensions")
         return options
 
     def firefox_browser_options(self) -> Options:
@@ -32,8 +30,16 @@ class WebDriverFactory():
         '''
         try:
             # Use webdriver_manager to handle ChromeDriver
-            driver = uc.Chrome(use_subprocess=False)
+            driver = uc.Chrome(use_subprocess=False, options=self.chrome_browser_options(), user_data_dir='C:\\Users\\chbla\\AppData\\Local\\Google\\Chrome\\User Data\\Default')
             self.logger.debug("Chrome Browser initialized successfully.")
+            stealth(driver,
+                    languages=["en-US", "en"],
+                    vendor="Google Inc.",
+                    platform="Win32",
+                    webgl_vendor="Intel Inc.",
+                    renderer="Intel Iris OpenGL Engine",
+                    fix_hairline=True,
+                    )
             return driver
 
         except Exception as e:

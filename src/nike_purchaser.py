@@ -1,3 +1,4 @@
+import json
 import traceback
 
 from bs4 import BeautifulSoup
@@ -18,7 +19,7 @@ class NikePurchaser():
     a tab for each shoe to snag configured per account
     '''
 
-    base_url = "https://www.nike.com"
+    base_url = "https://www.nike.com/"
     payment_account_url = "https://www.nike.com/member/settings/payment-methods"
     display_element_id = "nike-helper-custom-message-box"
     desktop_nav_list_xpath = "//ul[@class='desktop-list']"
@@ -66,32 +67,27 @@ class NikePurchaser():
     def __init__(self, driver: BaseWebDriver, user_account: UserAccount):
         self.driver = driver
         self.user_account = user_account
-        self.driver.get(NikePurchaser.base_url)
         self.logger = LocalLogging.get_local_logger("Nike_Purchaser")
-        self.original_tab = self.driver.current_window_handle
+        self.message_tab = self.driver.current_window_handle
+        self.execution_tab = None # this is the tab that the user will login too and we will use to snag
+        self.failed_login = False
+        self.driver.get(self.base_url)
+        self.last_message = ""
 
-        self.user_account.load_cookies(self.driver)
+        #self.user_account.load_cookies(self.driver)
+        self.states = ["INIT", "LOGGING_IN", "PAYMENT_REQUIRED", "READY_TO_SNAG"]
+        self.state = self.states[0]
 
 
     def setup_for_monitoring(self):
         '''
         Method that will get the driver into a state which has the user logged in, with a default payment method,
         and shipping address.
-
-        If the user account is not able to be created then display a big yellow box telling the user to fill it out
-        :except: if an un-handleable excpetion occurs that wont let this purchase to be able to achieve monitoring
         '''
-        starting_tabs = self.driver.window_handles
 
-        # Make sure were logged in
-        if self._requires_login():
-            self._show_user_message("You need to Open a new tab, and log in. Then return to this page for more instructions!" )
-            # Wait for the new window or tab
-            while len(self.driver.window_handles) == len(starting_tabs):
-                time.sleep(.5)
+        # Wait for the user to open a tab, do things, and come back to the message tab to interact
+        self._wait_for_user_input()
 
-            self.user_tab = self.driver.window_handles[-1]
-            self._wait_for_user_input()
 
 
     def _wait_for_user_input(self):
@@ -102,20 +98,18 @@ class NikePurchaser():
             : Once logged in and payment has been set runs the actual purchasing of items
         :return:
         '''
+        self.state = "LOGGING_IN"
         bad_attempts = 0
         max_bad_attempts = 5
-        updated_display_msg = False
-        while True or bad_attempts < max_bad_attempts:
+
+        while bad_attempts < max_bad_attempts:
             current_tab = self.driver.current_window_handle
-            #Make sure we only check when they return to the initial window
-            if current_tab == self.original_tab:
 
-                # If it is the first time display to the user
-                if not updated_display_msg:
-                    self._show_user_message("If you are having trouble logging in, open a new tab and try again.\n Once you are logged in leave only this tab and the other tab open. \nA:Press Backspace to save your login \nB: Enter to run monitoring to snag sneakers")
-                    updated_display_msg = True
-
+            # Handle the user returning to the original message tab
+            if current_tab == self.message_tab:
+                self._display_state_message()
                 try:
+                    # Allow the user to tell the program things via entering keys on the message tab
                     key_events = self.driver.execute_script("return window.keyEvents;")
                     if key_events == None:
                         try:
@@ -125,44 +119,78 @@ class NikePurchaser():
                             bad_attempts += 1
                     elif len(key_events) > 0:
                         key_code_pressed = key_events[0]['code']
-
-                        if key_code_pressed == 'Backspace': # Save cookies
-                            self.driver.switch_to.window(self.driver.window_handles[-1])
-                            self.user_account.save_cookies(self.driver)
-                        elif key_code_pressed == 'Enter': # run monitoring
-                            print("TODO build out the monitoring section")
-
+                        self._handle_user_interaction(key_code_pressed)
                         # clear the key events.
                         self.driver.execute_script("window.keyEvents = [];")
                 except Exception as scriptException:
                     self.logger.error(f"Unable to execute script which tracks input! Defaulting to just running snagging! - {scriptException}")
 
-
             time.sleep(1)  # Check every 500ms
+
+    def _display_state_message(self, error_msg=None):
+        if self.state == "LOGGING_IN":
+            if self.failed_login:
+                self._show_user_message("You indicated that you have logged in on another tab, however we couldnt see any tab where you were logged in! Make sure you see your account name like \"Hi Caleb\" in the top right on one tab other than this one and try again!", "red")
+            else:
+                if len(self.driver.window_handles) <= 1:
+                    self._show_user_message("You need to Open a new tab, and log in. Then return to this page for more instructions!" )
+                else:
+                    self._show_user_message("If you are having trouble logging in, open a new tab and try again. Once you are logged in on a tab, leave it open and return to this tab. A:Press Enter to tell the program you have finished logging in.", "blue")
+        if self.state == "PAYMENT_REQUIRED":
+            self._show_user_message("I checked the logged in tab and i found that there is not a default payment set, please set it and come back", "red")
+        if self.state == "READY_TO_SNAG":
+            self._show_user_message("Looks like you are already to go. press enter to have the app switch to snagging mode.")
+        if self.state == "ERROR" and error_msg:
+            self._show_user_message(f"Error Occured, Probably need to restart the app! {error_msg}", "red")
+
+    def _handle_user_interaction(self, key_code: str):
+        # User indicated that they are done with the current step
+        if 'Enter' in key_code: # run monitoring
+            if self.state == "LOGGING_IN":
+                # check to see if we need to login anymore
+                self._requires_login()
+                if self.failed_login:
+                    return
+
+                # IF the user logged in, their account can either be setup with payment or still need to do that
+                self.state = "PAYMENT_REQUIRED" if self._require_default_payment_method() else "READY_TO_SNAG"
+            elif self.state == "PAYMENT_REQUIRED":
+                self.state = "PAYMENT_REQUIRED" if self._require_default_payment_method() else "READY_TO_SNAG"
+            elif self.state == "READY_TO_SNAG":
+                # TODO GO PERFORM THE ACTUAL SNAGGING MONITORING
+                pass
 
 
     def _requires_login(self):
         '''
-        Checks that if there is a login element and if soo notifies the user to login
+        Cycles through all tabs but our "message Tab" and checks if they are on the nike domain, if so checks if any of them
+        are logged in. When one is finally logged in, it will attempt to store that tab as the "execution tab"
         '''
-        self.driver.switch_to.window(self.original_tab)
-        try:
-            desktop_nav = self.driver.find_element(By.XPATH, self.desktop_nav_list_xpath)
-            list_elements = desktop_nav.find_elements(By.XPATH, "./li")
-            # 3 elements means they have logged in
-            if len(list_elements) == 3:
-                self.logger.info("Found that the user is logged in!")
-                return False
-            elif len(list_elements) == 4:
-                self.logger.info("Found that the user is NOT logged in!")
-                return True
-            else:
-                self.logger.error(f"Unable to determine if the user is logged in or not! Found {len(list_elements)} elements in the nav elememnt")
-        except Exception as e:
-            self.logger.error("Script is broken, unable to find login element, maybe we dont need to be checking at this point?")
-            return True
 
-        return True
+        # cycle through all the tabs only considering ones that
+        for tab in self.driver.window_handles:
+            try:
+                self.driver.switch_to.window(tab)
+                if "nike.com" in self.driver.current_url: #only consider tabs that the user went too.
+                    desktop_nav = self.driver.find_element(By.XPATH, self.desktop_nav_list_xpath)
+                    list_elements = desktop_nav.find_elements(By.XPATH, "./li")
+                # 3 elements means they have logged in
+                if len(list_elements) == 3:
+                    self.logger.info("Found that the user is logged in!")
+                    self.execution_tab = tab
+                    self.failed_login = False
+                    # Break early, we dont need to consider the other tabs
+                    break
+                elif len(list_elements) == 4:
+                    self.logger.info("Found that the user is NOT logged in!")
+                    self.failed_login = True
+                else:
+                    self.logger.error(f"Unable to determine if the user is logged in or not! Found {len(list_elements)} elements in the nav elememnt")
+                    self.failed_login = True
+            except Exception as e:
+                self.logger.error("Script is broken, unable to find login element, maybe we dont need to be checking at this point?")
+                self.failed_login = True
+
 
     def _require_default_payment_method(self):
         '''
@@ -185,24 +213,40 @@ class NikePurchaser():
             self.logger.error(traceback.format_exc())
             return False
 
-    def _show_user_message(self, user_msg: str, color="yellow"):
+    def _show_user_message(self, user_msg: str, color="green"):
         '''
         Updates a div that will be shown to the user so they know what they need to do
 
         :param user_msg:
         :return:
         '''
+
+
         try:
             display_element = self.driver.find_element(By.ID, NikePurchaser.display_element_id)
+            # Avoid trying to display the same message over and over again
+            if display_element.text == user_msg:
+                return
         except Exception:
             display_element = None
 
         try:
             if not display_element: #If the page doesnt have the element yet, add it
+                escaped_msg = json.dumps(user_msg)
+                self.driver.execute_script(
+                    NikePurchaser.__messanger_script.format(
+                        elem_id=NikePurchaser.display_element_id,
+                        color=color,
+                        msg=escaped_msg
+                    )
+                )
                 self.driver.execute_script(NikePurchaser.__messanger_script.format(elem_id=NikePurchaser.display_element_id, color=color, msg=user_msg))
+                self.last_message = user_msg
             else: # The page has the element, so grab it and update its color and message
-                self.driver.execute_script(f"statusDiv.innerHTML = '{user_msg}';")
-                self.driver.execute_script(f"statusDiv.style.backgroundColor = '{user_msg}';")
+                escaped_msg = json.dumps(user_msg)
+                self.driver.execute_script(f"document.getElementById('{NikePurchaser.display_element_id}').innerHTML = {escaped_msg};")
+                self.driver.execute_script(f"document.getElementById('{NikePurchaser.display_element_id}').style.backgroundColor = '{color}';")
+                self.last_message = user_msg
         except Exception as display_exception:
             self.logger.error(display_exception)
             self.logger.error(traceback.format_exc())
