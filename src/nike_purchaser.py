@@ -1,5 +1,7 @@
 import json
 import traceback
+from multiprocessing import Process
+from pathlib import Path
 
 from bs4 import BeautifulSoup
 
@@ -7,11 +9,8 @@ from selenium.webdriver.remote.webdriver import BaseWebDriver
 from selenium.webdriver.common.by import By
 import time
 
-from selenium.webdriver.support import wait, expected_conditions as EC
-
 from src.config.local_logging import LocalLogging
-from src.config.user_account import UserAccount
-
+from src.sneaker_purchase_process import SneakerPurchaseProcess
 
 class NikePurchaser():
     '''
@@ -64,17 +63,18 @@ class NikePurchaser():
     document.addEventListener('keydown', logKeyPress, true); // Use capturing phase
     """
 
-    def __init__(self, driver: BaseWebDriver, user_account: UserAccount):
+    def __init__(self, driver: BaseWebDriver, shoes_file_path: Path):
         self.driver = driver
-        self.user_account = user_account
+        self.shoes_file_path = shoes_file_path
         self.logger = LocalLogging.get_local_logger("Nike_Purchaser")
         self.message_tab = self.driver.current_window_handle
         self.execution_tab = None # this is the tab that the user will login too and we will use to snag
         self.failed_login = False
+        self.purchase_process = None
         self.driver.get(self.base_url)
+
         self.last_message = ""
 
-        #self.user_account.load_cookies(self.driver)
         self.states = ["INIT", "LOGGING_IN", "PAYMENT_REQUIRED", "READY_TO_SNAG"]
         self.state = self.states[0]
 
@@ -87,8 +87,6 @@ class NikePurchaser():
 
         # Wait for the user to open a tab, do things, and come back to the message tab to interact
         self._wait_for_user_input()
-
-
 
     def _wait_for_user_input(self):
         '''
@@ -122,6 +120,15 @@ class NikePurchaser():
                         self._handle_user_interaction(key_code_pressed)
                         # clear the key events.
                         self.driver.execute_script("window.keyEvents = [];")
+                        # If we started the purchase process then we can exit this loop and just chill
+                        if self.purchaser:
+                            self.logger.info(f"Starting purchase process LETS GO!")
+                            try:
+                                self.purchaser.start_monitoring_sneakers()
+                                break
+                            except Exception as purchaser_exception:
+                                self.logger.error(f"Unable to run purchaser threads!! - {purchaser_exception}")
+
                 except Exception as scriptException:
                     self.logger.error(f"Unable to execute script which tracks input! Defaulting to just running snagging! - {scriptException}")
 
@@ -157,61 +164,7 @@ class NikePurchaser():
             elif self.state == "PAYMENT_REQUIRED":
                 self.state = "PAYMENT_REQUIRED" if self._require_default_payment_method() else "READY_TO_SNAG"
             elif self.state == "READY_TO_SNAG":
-                # TODO GO PERFORM THE ACTUAL SNAGGING MONITORING
-                pass
-
-
-    def _requires_login(self):
-        '''
-        Cycles through all tabs but our "message Tab" and checks if they are on the nike domain, if so checks if any of them
-        are logged in. When one is finally logged in, it will attempt to store that tab as the "execution tab"
-        '''
-
-        # cycle through all the tabs only considering ones that
-        for tab in self.driver.window_handles:
-            try:
-                self.driver.switch_to.window(tab)
-                if "nike.com" in self.driver.current_url: #only consider tabs that the user went too.
-                    desktop_nav = self.driver.find_element(By.XPATH, self.desktop_nav_list_xpath)
-                    list_elements = desktop_nav.find_elements(By.XPATH, "./li")
-                # 3 elements means they have logged in
-                if len(list_elements) == 3:
-                    self.logger.info("Found that the user is logged in!")
-                    self.execution_tab = tab
-                    self.failed_login = False
-                    # Break early, we dont need to consider the other tabs
-                    break
-                elif len(list_elements) == 4:
-                    self.logger.info("Found that the user is NOT logged in!")
-                    self.failed_login = True
-                else:
-                    self.logger.error(f"Unable to determine if the user is logged in or not! Found {len(list_elements)} elements in the nav elememnt")
-                    self.failed_login = True
-            except Exception as e:
-                self.logger.error("Script is broken, unable to find login element, maybe we dont need to be checking at this point?")
-                self.failed_login = True
-
-
-    def _require_default_payment_method(self):
-        '''
-        goes to the user setting after they have been logged in, and makes sure that there is BS4 Tag that reads
-        "Default Payment Method", if not displays a message to the user that one must be set
-        :return: the the user account has had its default payment method set on the session
-        '''
-        # Janky but not checking login
-        self.driver().get(NikePurchaser.payment_account_url)
-        page_html = self.driver().page_source
-        soup = BeautifulSoup(page_html, 'html.parser')
-
-        # Remove all the heavy strings that likely load with javascript
-        try:
-            default_payment_method_tag = soup.find(lambda tag: tag and tag.get_text().casefold() == "Default Payment Method".casefold())
-            if default_payment_method_tag:
-                return True
-        except Exception as e:
-            self.logger(e)
-            self.logger.error(traceback.format_exc())
-            return False
+                self.purchaser = SneakerPurchaseProcess(self.driver, self.shoes_file_path)
 
     def _show_user_message(self, user_msg: str, color="green"):
         '''
@@ -220,8 +173,6 @@ class NikePurchaser():
         :param user_msg:
         :return:
         '''
-
-
         try:
             display_element = self.driver.find_element(By.ID, NikePurchaser.display_element_id)
             # Avoid trying to display the same message over and over again
@@ -252,12 +203,73 @@ class NikePurchaser():
             self.logger.error(traceback.format_exc())
             return None
 
-    def _open_new_tab(self):
-        try:
-            self.driver.switch_to.new_window('tab')
-            return self.driver.current_window_handle
-        except Exception as e:
-            self.logger.error("Unable to open new tab for driver..." + e)
-            return None
 
-        return None
+    def _requires_login(self):
+        '''
+        Cycles through all tabs but our "message Tab" and checks if they are on the nike domain, if so checks if any of them
+        are logged in. When one is finally logged in, it will attempt to store that tab as the "execution tab"
+        '''
+
+        # cycle through all the tabs only considering ones that
+        for tab in self.driver.window_handles:
+
+            # The idea is the message tab is untouched
+            if tab == self.message_tab:
+                continue
+
+            try:
+                self.driver.switch_to.window(tab)
+                if "nike.com" in self.driver.current_url: #only consider tabs that the user went too.
+                    desktop_nav = self.driver.find_element(By.XPATH, self.desktop_nav_list_xpath)
+                    list_elements = desktop_nav.find_elements(By.XPATH, "./li")
+                # 3 elements means they have logged in
+                if len(list_elements) == 3:
+                    self.logger.info("Found that the user is logged in!")
+                    self.execution_tab = tab
+                    self.failed_login = False
+                    # Break early, we dont need to consider the other tabs
+                    break
+                elif len(list_elements) == 4:
+                    self.logger.info("Found that the user is NOT logged in!")
+                    self.failed_login = True
+                else:
+                    self.logger.error(f"Unable to determine if the user is logged in or not! Found {len(list_elements)} elements in the nav elememnt")
+                    self.failed_login = True
+            except Exception as e:
+                self.logger.error("Script is broken, unable to find login element, maybe we dont need to be checking at this point?")
+                self.failed_login = True
+
+        self.driver.switch_to.window(self.message_tab)
+
+    def _require_default_payment_method(self):
+        '''
+        goes to the user setting after they have been logged in, and makes sure that there is BS4 Tag that reads
+        "Default Payment Method", if not displays a message to the user that one must be set
+        :return: the the user account has had its default payment method set on the session
+        '''
+        if not self.execution_tab:
+            self.logger.error("Unable to check if default payment method is set as there is not an execution tab created yet!")
+            return False
+
+        self.driver.switch_to.window(self.execution_tab)
+        time.sleep(.5)
+
+        # Janky but not checking login
+        self.driver.get(NikePurchaser.payment_account_url)
+        time.sleep(.5)
+        page_html = self.driver.page_source
+        soup = BeautifulSoup(page_html, 'html.parser')
+        payment_set = False
+
+        # Remove all the heavy strings that likely load with javascript
+        try:
+            default_payment_method_tag = soup.find(lambda tag: tag and tag.get_text().casefold() == "Default Payment Method".casefold())
+            if default_payment_method_tag:
+                payment_set = True
+        except Exception as e:
+            self.logger(e)
+            self.logger.error(traceback.format_exc())
+            payment_set = False
+
+        self.driver.switch_to.window(self.message_tab)
+        return not payment_set
