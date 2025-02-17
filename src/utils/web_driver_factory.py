@@ -77,10 +77,11 @@ class WebDriverFactory():
         '''
         try:
             if LocalConfig.CHROME_PROFILE:
-                profile_path = LocalConfig.CHROME_USER_DATA_PATH + "\\" + LocalConfig.CHROME_PROFILE
+                profile_path = LocalConfig.CHROME_USER_DATA_PATH
                 if not os.path.exists(profile_path):
                     self.logger.error(f"Cannot find chrome profile at {LocalConfig.CHROME_USER_DATA_PATH} in the profile directory {LocalConfig.CHROME_PROFILE}")
-                options.user_data_dir = 'C:\\Users\\chbla\\AppData\\Local\\Google\\Chrome\\User Data\\Profile 9'
+                options.user_data_dir = profile_path
+                options.add_argument("--profile-directory="+LocalConfig.CHROME_PROFILE)
             else:
                 self.logger.info("No given chrome profile, running without a chrome profile!")
         except Exception as e:

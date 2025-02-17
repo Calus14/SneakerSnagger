@@ -6,8 +6,10 @@ import time
 from enum import Enum
 from pathlib import Path
 
+from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 
+from local_config import LocalConfig
 from src.config.local_logging import LocalLogging
 
 class SneakerPurchaseProcess():
@@ -37,6 +39,15 @@ class SneakerPurchaseProcess():
     availability_xpath = "//div[@class='available-date-component']" # there is a list, but the first one is all we care about
     sizes_xpath = "//li[@data-qa='size-available']"
     purchase_button_xpath = "//button[contains(@class, 'buying-tools-cta-button')]"
+    checkout_botton_xpath = "//button[@data-qa='checkout-link']"
+
+    # The checkout process uses SOP and IFRAMEs
+    cvv_iframe_xpath = "//iframe[@data-attr='credit-card-iframe-cvv']"
+    cvv_input_xpath = "//form[@id='creditCardForm']//input[@id='cvNumber']"
+    order_review_btn_xpath = "//button[@data-attr='continueToOrderReviewBtn']"
+    general_btn_xpath = "//button[@type='button']"
+    payment_error_xpath = "//h1[@id='modal-error']"
+    payment_error_reason_xpath = "//p[contains(@class, 'error-code-msg')]"
 
     class PurchaseState(Enum):
         NOT_STARTED = 1
@@ -302,12 +313,84 @@ class SneakerPurchaseProcess():
                 if purchase_size in size_text:
                     button.click()
                     purchase_button_element.click()
-                    return True
+                    return self.__checkout(sneaker_url)
             except Exception as e:
                 self.logger.error("Failed to find a size button on the size list element! Xpath schema broken!")
                 continue
 
         return False
+
+    def __checkout(self, sneaker_url):
+        '''
+        Attempts to flow through the checkout process
+        :return: true if it was able to log out, false if an exception or error occured.
+        '''
+        # Try to click the checkout button that should have appeared
+        try:
+            checkout_element = self.driver.find_element(By.XPATH, self.checkout_botton_xpath)
+            checkout_element.click()
+        except Exception as e:
+            self.sneaker_events[sneaker_url].append("Was not able to find and click the checkout element!")
+            self.sneaker_purchase_states[sneaker_url] = self.PurchaseState.ERROR
+            return False
+
+        if "nike.com/checkout" not in self.driver.current_url:
+            self.sneaker_events[sneaker_url].append(f"Clicked checkout button but was not able to navigate to checkout page!")
+            self.sneaker_purchase_states[sneaker_url] = self.PurchaseState.ERROR
+            return False
+
+        #Input the cvv number
+        try:
+            # the payment ui changes based on what is selected so we need to grab the iframe and switch to that.
+            cvv_iframe = self.driver.find_element(By.XPATH, self.cvv_iframe_xpath)
+            self.driver.switch_to.frame(cvv_iframe)
+
+            # Remove all the heavy strings that likely load with javascript
+            cvv_element = self.driver.find_element(By.XPATH, self.cvv_input_xpath)
+            cvv_element.send_keys(LocalConfig.CVV_NUMBER)
+            time.sleep(.25)
+            self.driver.switch_to.default_content()
+
+            order_review_btn = self.driver.find_element(By.XPATH, self.order_review_btn_xpath)
+            order_review_btn.click()
+        except Exception as e:
+            self.sneaker_events[sneaker_url].append("Could not find cvv element or order review button to checkout!")
+            self.sneaker_purchase_states[sneaker_url] = self.PurchaseState.ERROR
+            return False
+
+        # Finally click the submit payment button and make sure it went through!
+        try:
+            btn_elements = self.driver.find_elements(By.XPATH, self.general_btn_xpath)
+            submit_btn_element = None
+            for e in btn_elements:
+                if e.text and "Submit Payment" in e.text:
+                    submit_btn_element = e
+                    break
+
+            if submit_btn_element:
+                submit_btn_element.click()
+            else:
+                # raise an exception here so we can do the logging and state change in the catch
+                raise Exception()
+        except Exception as e:
+            self.sneaker_events[sneaker_url].append("Could not find and click the submit payment button!")
+            self.sneaker_purchase_states[sneaker_url] = self.PurchaseState.ERROR
+            return False
+
+        # Make sure there isnt a payment error modal
+        try:
+            payment_error_element = self.driver.find_element(By.XPATH, self.payment_error_xpath)
+            if payment_error_element:
+                payment_error_reason_element = self.driver.find_element(By.XPATH, self.payment_error_reason_xpath)
+                error_text = payment_error_reason_element.text
+                self.sneaker_events[sneaker_url].append(f"Payment was submitted but rejected by website for some error - {error_text}")
+                self.sneaker_purchase_states[sneaker_url] = self.PurchaseState.ERROR
+                return False
+        except Exception as e:
+            # An error occured while looking for an error, The enemy of my enemy is my friend
+            pass
+        
+        return True
 
     def __have_all_been_purchased(self):
         any_not_processed_or_error = False

@@ -6,10 +6,12 @@ class LocalConfig():
     '''
 
     # DO NOT CHANGE THESE
-    CHROME_USER_DATA_PATH = "C:\\Users\\chbla\\AppData\\Local\\Google\\Chrome\\User Data"
+    CHROME_USER_DATA_PATH = "C:\\Users\\chbla\\AppData\\Local\\Google\\Chrome\\Projects"
 
     # FEEL FREE TO CHANGE THESE
     USE_STEALTH = False
     BLOCK_NEW_RELIC = True
-    CHROME_PROFILE = "Default"
+    CHROME_PROFILE = "BobBurger"
+
+    CVV_NUMBER = "900"
 

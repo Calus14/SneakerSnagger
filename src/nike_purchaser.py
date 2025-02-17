@@ -20,8 +20,11 @@ class NikePurchaser():
 
     base_url = "https://www.nike.com/"
     payment_account_url = "https://www.nike.com/member/settings/payment-methods"
+    shipping_account_url = "https://www.nike.com/member/settings/delivery-addresses"
     display_element_id = "nike-helper-custom-message-box"
+
     desktop_nav_list_xpath = "//ul[@class='desktop-list']"
+    address_name_xpath = "//div[@data-testid='address-item']/div/div"
 
 
     # JavaScript to track clicks with Shift key pressed
@@ -75,7 +78,7 @@ class NikePurchaser():
 
         self.last_message = ""
 
-        self.states = ["INIT", "LOGGING_IN", "PAYMENT_REQUIRED", "READY_TO_SNAG"]
+        self.states = ["INIT", "LOGGING_IN", "PAYMENT_REQUIRED", "DEFAULT_ADDRESS_REQUIRED", "READY_TO_SNAG"]
         self.state = self.states[0]
 
 
@@ -144,7 +147,9 @@ class NikePurchaser():
                 else:
                     self._show_user_message("If you are having trouble logging in, open a new tab and try again. Once you are logged in on a tab, leave it open and return to this tab. A:Press Enter to tell the program you have finished logging in.", "blue")
         if self.state == "PAYMENT_REQUIRED":
-            self._show_user_message("I checked the logged in tab and i found that there is not a default payment set, please set it and come back", "red")
+            self._show_user_message("I checked the logged in tab and i found that there is not a default payment set, please set it and come back and press enter", "red")
+        if self.state == "DEFAULT_ADDRESS_REQUIRED":
+            self._show_user_message("I checked the logged in tab and i found that there is not a Default Address set, please set it and come back and press enter", "red")
         if self.state == "READY_TO_SNAG":
             self._show_user_message("Looks like you are already to go. press enter to have the app switch to snagging mode.")
         if self.state == "ERROR" and error_msg:
@@ -160,9 +165,13 @@ class NikePurchaser():
                     return
 
                 # IF the user logged in, their account can either be setup with payment or still need to do that
-                self.state = "PAYMENT_REQUIRED" if self._require_default_payment_method() else "READY_TO_SNAG"
+                self.state = "PAYMENT_REQUIRED" if self._require_default_payment_method() else "DEFAULT_ADDRESS_REQUIRED"
+                if self.state == "DEFAULT_ADDRESS_REQUIRED":
+                    self.state = "DEFAULT_ADDRESS_REQUIRED" if self._require_default_shipping_address() else "READY_TO_SNAG"
             elif self.state == "PAYMENT_REQUIRED":
-                self.state = "PAYMENT_REQUIRED" if self._require_default_payment_method() else "READY_TO_SNAG"
+                self.state = "PAYMENT_REQUIRED" if self._require_default_payment_method() else "DEFAULT_ADDRESS_REQUIRED"
+            elif self.state == "DEFAULT_ADDRESS_REQUIRED":
+                self.state = "DEFAULT_ADDRESS_REQUIRED" if self._require_default_shipping_address() else "READY_TO_SNAG"
             elif self.state == "READY_TO_SNAG":
                 self.purchaser = SneakerPurchaseProcess(self.driver, self.shoes_file_path)
 
@@ -273,3 +282,36 @@ class NikePurchaser():
 
         self.driver.switch_to.window(self.message_tab)
         return not payment_set
+
+    def _require_default_shipping_address(self):
+        '''
+        goes to the user setting after they have been logged in, and makes sure that there is BS4 Tag that reads
+        "Default Delivery Address", if not displays a message to the user that one must be set
+        :return: the the user account has had its default payment method set on the session
+        '''
+        if not self.execution_tab:
+            self.logger.error("Unable to check if default shipping address is set as there is not an execution tab created yet!")
+            return False
+
+        self.driver.switch_to.window(self.execution_tab)
+        time.sleep(.5)
+
+        # Janky but not checking login
+        self.driver.get(NikePurchaser.shipping_account_url)
+        time.sleep(.5)
+        page_html = self.driver.page_source
+        soup = BeautifulSoup(page_html, 'html.parser')
+        default_address_set = False
+
+        # Remove all the heavy strings that likely load with javascript
+        try:
+            default_shipping_address_tag = soup.find(lambda tag: tag and tag.get_text().casefold() == "Default Delivery Address".casefold())
+            if default_shipping_address_tag:
+                default_address_set = True
+        except Exception as e:
+            self.logger(e)
+            self.logger.error(traceback.format_exc())
+            default_address_set = False
+
+        self.driver.switch_to.window(self.message_tab)
+        return not default_address_set
